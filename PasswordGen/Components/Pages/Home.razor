@@ -1,0 +1,169 @@
+﻿@page "/"
+@rendermode InteractiveServer
+@using System.Net.Http.Json
+@using PasswordGen.Models
+@using PasswordGen.Services
+@inject HttpClient Http
+@inject NavigationManager Nav
+@inject HistoryService History
+
+<div class="generator-card">
+    <h1>Генератор паролей</h1>
+
+    <div class="row">
+        <label>Длина пароля: <b>@length</b></label>
+        <input type="range" min="4" max="64" @bind="length" @bind:event="oninput" />
+    </div>
+
+    <div class="row">
+        <span>Типы символов:</span><br />
+        <label><input type="checkbox" @bind="useUpper" /> Заглавные (A-Z)</label><br />
+        <label><input type="checkbox" @bind="useLower" /> Строчные (a-z)</label><br />
+        <label><input type="checkbox" @bind="useDigits" /> Цифры (0-9)</label><br />
+        <label><input type="checkbox" @bind="useSymbols" /> Символы (!@@#)</label><br />
+        <label><input type="checkbox" @bind="excludeLookAlike" /> Исключить похожие (O0, l1)</label>
+    </div>
+
+    <div class="prediction">
+        Прогнозируемая энтропия: <b>@PredictedEntropy.ToString("F1") бит</b> — @PredictedStrength
+    </div>
+
+    @if (!AnyTypeSelected)
+    {
+        <div class="error">Выберите хотя бы один тип символов!</div>
+    }
+
+    <button class="btn" disabled="@(busy || !AnyTypeSelected)" @onclick="GenerateAsync">
+        @(busy ? "Генерация..." : "Сгенерировать")
+    </button>
+
+    @if (!string.IsNullOrEmpty(error))
+    {
+        <div class="error">@error</div>
+    }
+
+    @if (result is not null)
+    {
+        <div class="result">
+            <code>@result.Password</code><br />
+            <small>
+                Пул: @result.PoolSize симв. ·
+                Энтропия: @result.EntropyBits.ToString("F1") бит ·
+                @result.Strength
+            </small>
+
+            @if (result.BreachCount == -1)
+            {
+                <div class="warning">Не удалось проверить пароль на утечки (ошибка сети или сервиса).</div>
+            }
+            else if (result.BreachCount > 0)
+            {
+                <div class="danger">ВНИМАНИЕ: этот пароль найден в базах утечек @result.BreachCount раз(а)! Не используйте его.</div>
+            }
+            else
+            {
+                <div class="success">Пароль чист: в известных базах утечек не обнаружен.</div>
+            }
+        </div>
+    }
+
+    <h3>История (последние @HistoryService.MaxItems)</h3>
+    @if (History.Items.Count == 0)
+    {
+        <p>Пока нет сгенерированных паролей.</p>
+    }
+    else
+    {
+        <ul class="history">
+            @foreach (var item in History.Items)
+            {
+                <li>
+                    <code>@item.Password</code>
+                    <small>
+                        @item.EntropyBits.ToString("F1") бит —
+                        @item.Strength
+                        (@item.GeneratedAt.ToString("HH:mm:ss"))
+                    </small>
+                </li>
+            }
+        </ul>
+    }
+</div>
+
+@code {
+    private int length = 16;
+    private bool useUpper = true;
+    private bool useLower = true;
+    private bool useDigits = true;
+    private bool useSymbols = false;
+    private bool excludeLookAlike = false;
+
+    private GeneratePasswordResponse? result;
+    private string? error;
+    private bool busy;
+
+    private bool AnyTypeSelected => useUpper || useLower || useDigits || useSymbols;
+
+    private int PoolSize =>
+        PasswordService.BuildPool(useUpper, useLower, useDigits, useSymbols, excludeLookAlike).Length;
+
+    private double PredictedEntropy =>
+        PasswordService.EntropyBits(length, Math.Max(PoolSize, 2));
+
+    private string PredictedStrength =>
+        PasswordService.Strength(PredictedEntropy);
+
+    private async Task GenerateAsync()
+    {
+        error = null;
+
+        if (!AnyTypeSelected)
+        {
+            error = "Выберите хотя бы один тип символов!";
+            return;
+        }
+
+        busy = true;
+        try
+        {
+            var request = new GeneratePasswordRequest
+            {
+                Length = length,
+                UseUppercase = useUpper,
+                UseLowercase = useLower,
+                UseDigits = useDigits,
+                UseSymbols = useSymbols,
+                ExcludeLookAlike = excludeLookAlike
+            };
+
+            var response = await Http.PostAsJsonAsync(Nav.BaseUri + "api/password/generate", request);
+
+            if (response.IsSuccessStatusCode)
+            {
+                result = await response.Content.ReadFromJsonAsync<GeneratePasswordResponse>();
+                if (result is not null)
+                {
+                    History.Add(new HistoryItem(
+                        result.Password,
+                        result.EntropyBits,
+                        result.Strength,
+                        result.GeneratedAt));
+                }
+            }
+            else
+            {
+                result = null;
+                var err = await response.Content.ReadFromJsonAsync<ErrorResponse>();
+                error = err?.Message ?? $"Сервер вернул статус {(int)response.StatusCode}.";
+            }
+        }
+        catch (Exception ex)
+        {
+            error = $"Ошибка соединения: {ex.Message}";
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+}
